@@ -1,0 +1,17 @@
+{
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "npm install",
+    "nixpacksPlan": {
+      "phases": {
+        "setup": {
+          "aptPkgs": ["ffmpeg"]
+        }
+      }
+    }
+  },
+  "deploy": {
+    "startCommand": "npm start",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
