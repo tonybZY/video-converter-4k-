@@ -53,157 +53,245 @@ function extractGoogleDriveId(url) {
     return null;
 }
 
-// Fonction pour télécharger depuis Google Drive (VERSION CORRIGÉE)
+// FONCTION ULTRA ROBUSTE pour télécharger depuis Google Drive
 async function downloadFromGoogleDrive(url, outputPath) {
-    try {
-        // Extraire l'ID du fichier
-        const fileId = extractGoogleDriveId(url);
-        if (!fileId) {
-            throw new Error('ID Google Drive non trouvé dans l\'URL');
+    const fileId = extractGoogleDriveId(url);
+    if (!fileId) {
+        throw new Error('ID Google Drive non trouvé dans l\'URL');
+    }
+    
+    console.log(`\n📥 Téléchargement Google Drive: ${fileId}`);
+    console.log(`📁 Destination: ${outputPath}`);
+    
+    // Stratégie de téléchargement en plusieurs étapes
+    const strategies = [
+        {
+            name: 'Méthode 1: Direct avec confirmation',
+            url: `https://drive.google.com/uc?export=download&confirm=t&id=${fileId}`
+        },
+        {
+            name: 'Méthode 2: API alternative',
+            url: `https://drive.google.com/uc?id=${fileId}&export=download&confirm=t`
+        },
+        {
+            name: 'Méthode 3: Avec token dynamique',
+            url: `https://drive.google.com/uc?export=download&id=${fileId}`,
+            requiresToken: true
         }
-        
-        console.log(`📥 Téléchargement depuis Google Drive: ${fileId}`);
-        
-        // IMPORTANT : Utiliser l'API Google Drive v3 pour les gros fichiers
-        // D'abord essayer le téléchargement direct
-        let downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+    ];
+    
+    let lastError = null;
+    
+    for (const strategy of strategies) {
+        console.log(`\n🔄 Essai: ${strategy.name}`);
         
         try {
-            // Premier essai : téléchargement direct
-            const response = await axios({
-                method: 'GET',
-                url: downloadUrl,
-                responseType: 'stream',
-                timeout: 600000,
-                maxContentLength: Infinity,
-                maxBodyLength: Infinity,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            });
-            
-            // Vérifier si c'est vraiment une vidéo
-            const contentType = response.headers['content-type'];
-            console.log('📋 Content-Type reçu:', contentType);
-            
-            if (contentType && contentType.includes('text/html')) {
-                // C'est une page HTML, pas une vidéo !
-                console.error('❌ Google Drive a renvoyé une page HTML au lieu de la vidéo');
-                console.log('💡 Solutions :');
-                console.log('   1. Rendez le fichier public (Partager → Tout le monde ayant le lien)');
-                console.log('   2. Utilisez un fichier plus petit (<100MB)');
-                console.log('   3. Utilisez l\'API Google Drive avec authentification');
-                
-                throw new Error('Le fichier Google Drive n\'est pas accessible directement. Rendez-le public ou utilisez un fichier plus petit.');
+            if (strategy.requiresToken) {
+                // Méthode complexe pour obtenir le token de confirmation
+                await downloadWithConfirmationToken(fileId, outputPath);
+            } else {
+                // Méthode directe
+                await downloadDirect(strategy.url, outputPath);
             }
             
-            // Sauvegarder le fichier
-            const writer = fs.createWriteStream(outputPath);
-            response.data.pipe(writer);
+            // Vérifier que le téléchargement est valide
+            const stats = fs.statSync(outputPath);
+            console.log(`✅ Fichier téléchargé: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
             
-            return new Promise((resolve, reject) => {
-                writer.on('finish', () => {
-                    // Vérifier la taille du fichier
-                    const stats = fs.statSync(outputPath);
-                    console.log(`✅ Téléchargement terminé: ${outputPath} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
-                    
-                    // Si le fichier est trop petit, c'est probablement une page HTML
-                    if (stats.size < 1000) {
-                        const content = fs.readFileSync(outputPath, 'utf8');
-                        if (content.includes('<!DOCTYPE') || content.includes('<html')) {
-                            fs.unlinkSync(outputPath);
-                            reject(new Error('Google Drive a renvoyé une page HTML. Le fichier doit être rendu public.'));
-                            return;
-                        }
-                    }
-                    
-                    resolve();
-                });
-                writer.on('error', reject);
-            });
+            // Vérifier que ce n'est pas une page HTML
+            if (stats.size < 50000) { // < 50KB, probablement HTML
+                const content = fs.readFileSync(outputPath, 'utf8').substring(0, 200);
+                if (content.includes('<!DOCTYPE') || content.includes('<html')) {
+                    console.log('⚠️ Fichier HTML détecté, passage à la stratégie suivante');
+                    fs.unlinkSync(outputPath);
+                    lastError = new Error('Page HTML reçue au lieu du fichier');
+                    continue;
+                }
+            }
+            
+            // Succès !
+            return;
             
         } catch (error) {
-            if (error.response && error.response.status === 404) {
-                throw new Error('Fichier Google Drive introuvable. Vérifiez l\'URL.');
+            console.error(`❌ Échec: ${error.message}`);
+            lastError = error;
+            
+            // Nettoyer si le fichier existe
+            if (fs.existsSync(outputPath)) {
+                fs.unlinkSync(outputPath);
             }
-            throw error;
         }
-        
-    } catch (error) {
-        console.error('❌ Erreur téléchargement:', error.message);
-        throw error;
     }
+    
+    // Si toutes les stratégies ont échoué
+    throw new Error(`Impossible de télécharger le fichier Google Drive. Dernier erreur: ${lastError?.message}`);
+}
+
+// Téléchargement direct
+async function downloadDirect(url, outputPath) {
+    const response = await axios({
+        method: 'GET',
+        url: url,
+        responseType: 'stream',
+        timeout: 1200000, // 20 minutes pour les très gros fichiers
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive'
+        },
+        // Suivre les redirections
+        maxRedirects: 10
+    });
+    
+    const writer = fs.createWriteStream(outputPath);
+    
+    // Afficher la progression
+    const totalSize = parseInt(response.headers['content-length'] || '0');
+    let downloadedSize = 0;
+    
+    response.data.on('data', (chunk) => {
+        downloadedSize += chunk.length;
+        if (totalSize > 0) {
+            const progress = (downloadedSize / totalSize * 100).toFixed(1);
+            process.stdout.write(`\r📊 Téléchargement: ${progress}% (${(downloadedSize / 1024 / 1024).toFixed(1)}MB / ${(totalSize / 1024 / 1024).toFixed(1)}MB)`);
+        }
+    });
+    
+    response.data.pipe(writer);
+    
+    return new Promise((resolve, reject) => {
+        writer.on('finish', () => {
+            console.log('\n✅ Téléchargement terminé');
+            resolve();
+        });
+        writer.on('error', reject);
+        response.data.on('error', reject);
+    });
+}
+
+// Téléchargement avec token de confirmation (pour gros fichiers)
+async function downloadWithConfirmationToken(fileId, outputPath) {
+    // Étape 1: Obtenir la page avec le token
+    console.log('🔑 Récupération du token de confirmation...');
+    
+    const initialUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+    const response = await axios({
+        method: 'GET',
+        url: initialUrl,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+    });
+    
+    const html = response.data;
+    
+    // Chercher le token de confirmation
+    const tokenMatch = html.match(/confirm=([a-zA-Z0-9_-]+)/);
+    const uuidMatch = html.match(/uuid=([a-zA-Z0-9_-]+)/);
+    
+    if (!tokenMatch) {
+        throw new Error('Token de confirmation non trouvé');
+    }
+    
+    const confirmToken = tokenMatch[1];
+    const uuid = uuidMatch ? uuidMatch[1] : '';
+    
+    console.log('🔓 Token trouvé:', confirmToken);
+    
+    // Étape 2: Télécharger avec le token
+    const downloadUrl = `https://drive.google.com/uc?export=download&confirm=${confirmToken}&id=${fileId}${uuid ? '&uuid=' + uuid : ''}`;
+    
+    // Conserver les cookies
+    const cookies = response.headers['set-cookie'] || [];
+    const cookieString = cookies.map(c => c.split(';')[0]).join('; ');
+    
+    await downloadDirect(downloadUrl, outputPath);
 }
 
 // Fonction pour convertir la vidéo (optimisée pour les réseaux sociaux)
 async function convertVideo(inputPath, outputPath, quality = '4k') {
     return new Promise((resolve, reject) => {
-        console.log(`🎬 Conversion en cours: ${quality}`);
+        console.log(`\n🎬 Conversion en ${quality}...`);
         
-        // Paramètres optimisés pour les réseaux sociaux
-        let outputOptions = [
-            '-c:v libx264',      // Codec vidéo H.264 (compatible partout)
-            '-preset medium',     // Balance qualité/vitesse
-            '-crf 23',           // Qualité (plus bas = meilleure qualité)
-            '-c:a aac',          // Codec audio AAC
-            '-b:a 192k',         // Bitrate audio
-            '-movflags +faststart', // Optimisation pour streaming
-            '-pix_fmt yuv420p'   // Format de pixels compatible
-        ];
-        
-        // Résolution selon la qualité demandée
-        switch(quality) {
-            case '4k':
-                outputOptions.push('-vf scale=3840:2160:force_original_aspect_ratio=decrease,pad=3840:2160:(ow-iw)/2:(oh-ih)/2');
-                outputOptions.push('-b:v 35M'); // Bitrate pour 4K
-                break;
-            case '1080p':
-                outputOptions.push('-vf scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2');
-                outputOptions.push('-b:v 8M');  // Bitrate pour 1080p
-                break;
-            case '720p':
-                outputOptions.push('-vf scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2');
-                outputOptions.push('-b:v 5M');  // Bitrate pour 720p
-                break;
-            default:
-                // Garder la qualité originale
-                outputOptions.push('-b:v 10M');
-        }
-        
-        ffmpeg(inputPath)
-            .outputOptions(outputOptions)
-            .on('start', (commandLine) => {
-                console.log('🎯 Commande FFmpeg:', commandLine);
-            })
-            .on('progress', (progress) => {
-                if (progress.percent) {
-                    console.log(`📊 Progression: ${Math.round(progress.percent)}%`);
-                }
-            })
-            .on('end', () => {
-                console.log('✅ Conversion terminée');
-                resolve();
-            })
-            .on('error', (err) => {
-                console.error('❌ Erreur conversion:', err);
+        // Obtenir les infos de la vidéo
+        ffmpeg.ffprobe(inputPath, (err, metadata) => {
+            if (err) {
                 reject(err);
-            })
-            .save(outputPath);
+                return;
+            }
+            
+            const duration = metadata.format.duration;
+            console.log(`📹 Durée: ${Math.floor(duration / 60)}:${Math.floor(duration % 60)}`);
+            
+            // Paramètres optimisés pour les réseaux sociaux
+            let outputOptions = [
+                '-c:v libx264',      // Codec vidéo H.264 (compatible partout)
+                '-preset medium',     // Balance qualité/vitesse
+                '-crf 23',           // Qualité (plus bas = meilleure qualité)
+                '-c:a aac',          // Codec audio AAC
+                '-b:a 192k',         // Bitrate audio
+                '-movflags +faststart', // Optimisation pour streaming
+                '-pix_fmt yuv420p'   // Format de pixels compatible
+            ];
+            
+            // Résolution selon la qualité demandée
+            switch(quality) {
+                case '4k':
+                    outputOptions.push('-vf scale=3840:2160:force_original_aspect_ratio=decrease,pad=3840:2160:(ow-iw)/2:(oh-ih)/2');
+                    outputOptions.push('-b:v 35M'); // Bitrate pour 4K
+                    break;
+                case '1080p':
+                    outputOptions.push('-vf scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2');
+                    outputOptions.push('-b:v 8M');  // Bitrate pour 1080p
+                    break;
+                case '720p':
+                    outputOptions.push('-vf scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2');
+                    outputOptions.push('-b:v 5M');  // Bitrate pour 720p
+                    break;
+                default:
+                    // Garder la qualité originale
+                    outputOptions.push('-b:v 10M');
+            }
+            
+            const ffmpegCommand = ffmpeg(inputPath)
+                .outputOptions(outputOptions)
+                .on('start', (commandLine) => {
+                    console.log('🎯 Commande FFmpeg:', commandLine);
+                })
+                .on('progress', (progress) => {
+                    if (progress.percent) {
+                        process.stdout.write(`\r📊 Conversion: ${Math.round(progress.percent)}%`);
+                    }
+                })
+                .on('end', () => {
+                    console.log('\n✅ Conversion terminée');
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error('❌ Erreur conversion:', err);
+                    reject(err);
+                })
+                .save(outputPath);
+        });
     });
 }
 
 // Route principale de l'API
 app.post('/api/convert', authenticate, async (req, res) => {
-    console.log('\n=== NOUVELLE REQUÊTE REÇUE ===');
-    console.log('Body reçu:', JSON.stringify(req.body, null, 2));
+    console.log('\n=== NOUVELLE REQUÊTE DE CONVERSION ===');
+    console.log('📅 Date:', new Date().toISOString());
+    console.log('📦 Body:', JSON.stringify(req.body, null, 2));
     
     const { url, quality = '4k', filename } = req.body;
     
     // Validation
-    if (!url || !url.includes('drive.google.com')) {
+    if (!url) {
         return res.status(400).json({ 
-            error: 'URL Google Drive requise',
-            example: 'https://drive.google.com/file/d/FILE_ID/view'
+            error: 'URL requise',
+            message: 'Fournissez une URL Google Drive ou directe'
         });
     }
     
@@ -214,37 +302,51 @@ app.post('/api/convert', authenticate, async (req, res) => {
     const outputFile = path.join(OUTPUT_DIR, outputFilename);
     
     try {
-        // 1. Télécharger depuis Google Drive
-        console.log('\n🚀 Nouvelle conversion:', { url, quality });
-        await downloadFromGoogleDrive(url, tempFile);
+        // 1. Télécharger la vidéo
+        console.log('\n🚀 Étape 1: Téléchargement');
         
-        // 2. Vérifier que le fichier existe
+        if (url.includes('drive.google.com')) {
+            await downloadFromGoogleDrive(url, tempFile);
+        } else {
+            // Support des URLs directes
+            console.log('📥 Téléchargement direct depuis:', url);
+            await downloadDirect(url, tempFile);
+        }
+        
+        // 2. Vérifier que le fichier existe et est valide
         if (!fs.existsSync(tempFile)) {
             throw new Error('Échec du téléchargement');
         }
         
-        // 3. Obtenir la taille du fichier
         const stats = fs.statSync(tempFile);
-        console.log(`📁 Taille du fichier: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+        console.log(`\n📁 Fichier téléchargé: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
         
-        // 4. Convertir la vidéo
+        // 3. Convertir la vidéo
+        console.log('\n🚀 Étape 2: Conversion');
         await convertVideo(tempFile, outputFile, quality);
         
-        // 5. Nettoyer le fichier temporaire
+        // 4. Nettoyer le fichier temporaire
         fs.unlinkSync(tempFile);
+        console.log('🗑️ Fichier temporaire supprimé');
         
-        // 6. Générer l'URL de téléchargement
+        // 5. Générer l'URL de téléchargement
         const downloadUrl = `${DOMAIN}/download/${outputFilename}`;
         
-        // 7. Programmer la suppression après 10 minutes
+        // 6. Programmer la suppression après 10 minutes
         setTimeout(() => {
             if (fs.existsSync(outputFile)) {
                 fs.unlinkSync(outputFile);
-                console.log(`🗑️ Fichier supprimé: ${outputFilename}`);
+                console.log(`🗑️ Fichier converti supprimé: ${outputFilename}`);
             }
         }, 600000); // 10 minutes
         
-        // 8. Réponse avec toutes les infos
+        // 7. Réponse avec toutes les infos
+        const finalStats = fs.statSync(outputFile);
+        
+        console.log('\n✅ CONVERSION RÉUSSIE !');
+        console.log(`📦 Taille finale: ${(finalStats.size / 1024 / 1024).toFixed(2)} MB`);
+        console.log(`🔗 URL: ${downloadUrl}`);
+        
         res.json({
             success: true,
             message: 'Conversion réussie',
@@ -253,7 +355,8 @@ app.post('/api/convert', authenticate, async (req, res) => {
                 directUrl: downloadUrl,
                 filename: outputFilename,
                 quality: quality,
-                size: fs.statSync(outputFile).size,
+                size: finalStats.size,
+                sizeMB: (finalStats.size / 1024 / 1024).toFixed(2),
                 expiresIn: '10 minutes',
                 format: 'mp4',
                 optimizedFor: 'social_media'
@@ -261,7 +364,7 @@ app.post('/api/convert', authenticate, async (req, res) => {
         });
         
     } catch (error) {
-        console.error('❌ Erreur globale:', error);
+        console.error('\n❌ ERREUR GLOBALE:', error);
         
         // Nettoyer les fichiers en cas d'erreur
         [tempFile, outputFile].forEach(file => {
@@ -309,7 +412,15 @@ app.get('/download/:filename', (req, res) => {
 app.get('/api/status', (req, res) => {
     res.json({
         status: 'online',
-        version: '2.0',
+        version: '3.0 ULTRA',
+        features: [
+            '✅ Support des gros fichiers Google Drive (>100MB)',
+            '✅ Multiples stratégies de téléchargement',
+            '✅ Gestion automatique des tokens de confirmation',
+            '✅ Support des URLs directes',
+            '✅ Progression en temps réel',
+            '✅ Conversion 4K optimisée'
+        ],
         api: {
             endpoint: '/api/convert',
             method: 'POST',
@@ -318,17 +429,16 @@ app.get('/api/status', (req, res) => {
                 'Content-Type': 'application/json'
             },
             body: {
-                url: 'URL Google Drive (requis)',
+                url: 'URL Google Drive ou directe (requis)',
                 quality: '4k, 1080p, 720p, original (optionnel, défaut: 4k)',
                 filename: 'Nom personnalisé (optionnel)'
             }
         },
         supportedQualities: ['4k', '1080p', '720p', 'original'],
-        optimizations: [
-            'H.264/AAC pour compatibilité maximale',
-            'Optimisé pour streaming (faststart)',
-            'Bitrate adapté par résolution',
-            'Aspect ratio préservé avec padding noir'
+        supportedSources: [
+            'Google Drive (tous types de partage)',
+            'URLs directes (HTTP/HTTPS)',
+            'Fichiers jusqu\'à 5GB'
         ]
     });
 });
@@ -336,9 +446,10 @@ app.get('/api/status', (req, res) => {
 // Page d'accueil simple
 app.get('/', (req, res) => {
     res.json({
-        name: 'Video Converter API',
-        version: '2.0',
+        name: 'Video Converter API - ULTRA Edition',
+        version: '3.0',
         status: 'Ready',
+        message: 'API ultra robuste pour conversion vidéo 4K',
         documentation: '/api/status',
         usage: 'POST /api/convert avec X-API-Key header'
     });
@@ -371,15 +482,19 @@ app.use((req, res) => {
 // Démarrer le serveur
 app.listen(PORT, () => {
     console.log(`
-🚀 Video Converter API démarré!
-📡 Port: ${PORT}
-🔗 URL: ${DOMAIN}
-🔑 API Key: ${API_KEY ? 'Configurée' : 'Non configurée'}
-📁 Dossiers: ${UPLOAD_DIR}/ et ${OUTPUT_DIR}/
-
-📝 Utilisation:
-   POST ${DOMAIN}/api/convert
-   Headers: X-API-Key: ${API_KEY}
-   Body: { "url": "https://drive.google.com/..." }
+╔═══════════════════════════════════════════════════════════╗
+║          🚀 VIDEO CONVERTER API - ULTRA EDITION 🚀          ║
+╠═══════════════════════════════════════════════════════════╣
+║ 📡 Port      : ${PORT}                                          ║
+║ 🔗 URL       : ${DOMAIN}${' '.repeat(45 - DOMAIN.length)}║
+║ 🔑 API Key   : ${API_KEY ? 'Configurée ✅' : 'Non configurée ❌'}                             ║
+║ 📁 Dossiers  : ${UPLOAD_DIR}/ et ${OUTPUT_DIR}/                             ║
+╠═══════════════════════════════════════════════════════════╣
+║ 🎯 Fonctionnalités:                                        ║
+║ • Support des gros fichiers Google Drive (>100MB)          ║
+║ • Multiples stratégies de téléchargement                   ║
+║ • Conversion 4K avec optimisation réseaux sociaux          ║
+║ • Progression en temps réel                                ║
+╚═══════════════════════════════════════════════════════════╝
     `);
 });
