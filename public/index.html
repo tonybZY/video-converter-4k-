@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Convertisseur Vidéo 4K Universal</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎬 Convertisseur Vidéo 4K</h1>
+            <p>Convertissez vos vidéos depuis n'importe quelle source</p>
+        </header>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('url')">📎 Depuis URL</button>
+            <button class="tab" onclick="switchTab('file')">📁 Depuis Fichier</button>
+        </div>
+
+        <!-- Onglet URL -->
+        <div id="url-tab" class="tab-content active">
+            <form id="url-form">
+                <div class="input-group">
+                    <label for="video-url">URL de la vidéo</label>
+                    <input 
+                        type="url" 
+                        id="video-url" 
+                        placeholder="Collez l'URL (Google Drive, Dropbox, YouTube, etc.)"
+                        required
+                    >
+                    <small>✅ Support: Google Drive, Dropbox, YouTube, Vimeo, liens directs...</small>
+                </div>
+
+                <div class="options">
+                    <div class="option">
+                        <label for="quality-url">Qualité</label>
+                        <select id="quality-url">
+                            <option value="4k">4K (2160p)</option>
+                            <option value="1080p">Full HD (1080p)</option>
+                            <option value="720p">HD (720p)</option>
+                            <option value="original">Original</option>
+                        </select>
+                    </div>
+
+                    <div class="option">
+                        <label for="format-url">Format</label>
+                        <select id="format-url">
+                            <option value="mp4">MP4</option>
+                            <option value="avi">AVI</option>
+                            <option value="mov">MOV</option>
+                            <option value="mkv">MKV</option>
+                            <option value="webm">WebM</option>
+                        </select>
+                    </div>
+                </div>
+
+                <button type="submit" class="convert-btn">
+                    🚀 Convertir depuis URL
+                </button>
+            </form>
+        </div>
+
+        <!-- Onglet Fichier -->
+        <div id="file-tab" class="tab-content">
+            <form id="file-form">
+                <div class="upload-area" id="upload-area">
+                    <input type="file" id="video-file" accept="video/*" hidden>
+                    <div class="upload-icon">📹</div>
+                    <p>Glissez votre vidéo ici ou cliquez pour sélectionner</p>
+                    <small>Formats supportés: MP4, AVI, MOV, MKV, FLV, WebM, etc.</small>
+                </div>
+
+                <div class="file-info" id="file-info" style="display: none;">
+                    <p>📄 <span id="file-name"></span></p>
+                    <p>📊 <span id="file-size"></span></p>
+                </div>
+
+                <div class="options">
+                    <div class="option">
+                        <label for="quality-file">Qualité</label>
+                        <select id="quality-file">
+                            <option value="4k">4K (2160p)</option>
+                            <option value="1080p">Full HD (1080p)</option>
+                            <option value="720p">HD (720p)</option>
+                            <option value="original">Original</option>
+                        </select>
+                    </div>
+
+                    <div class="option">
+                        <label for="format-file">Format</label>
+                        <select id="format-file">
+                            <option value="mp4">MP4</option>
+                            <option value="avi">AVI</option>
+                            <option value="mov">MOV</option>
+                            <option value="mkv">MKV</option>
+                            <option value="webm">WebM</option>
+                        </select>
+                    </div>
+                </div>
+
+                <button type="submit" class="convert-btn" disabled>
+                    🚀 Convertir le fichier
+                </button>
+            </form>
+        </div>
+
+        <!-- Zone de progression -->
+        <div id="progress-area" style="display: none;">
+            <h3>⏳ Conversion en cours...</h3>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <p id="progress-text">Préparation...</p>
+        </div>
+
+        <!-- Zone de résultat -->
+        <div id="result-area" style="display: none;">
+            <h3>✅ Conversion terminée!</h3>
+            <p>Votre vidéo a été convertie avec succès.</p>
+            <button class="download-btn" id="download-btn">
+                💾 Télécharger la vidéo
+            </button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
