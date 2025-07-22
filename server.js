@@ -53,7 +53,7 @@ function extractGoogleDriveId(url) {
     return null;
 }
 
-// Fonction pour télécharger depuis Google Drive
+// Fonction pour télécharger depuis Google Drive (VERSION CORRIGÉE)
 async function downloadFromGoogleDrive(url, outputPath) {
     try {
         // Extraire l'ID du fichier
@@ -62,35 +62,72 @@ async function downloadFromGoogleDrive(url, outputPath) {
             throw new Error('ID Google Drive non trouvé dans l\'URL');
         }
         
-        // URL de téléchargement direct Google Drive
-        const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
-        
         console.log(`📥 Téléchargement depuis Google Drive: ${fileId}`);
         
-        // Télécharger le fichier
-        const response = await axios({
-            method: 'GET',
-            url: downloadUrl,
-            responseType: 'stream',
-            timeout: 600000, // 10 minutes pour les gros fichiers
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        });
+        // IMPORTANT : Utiliser l'API Google Drive v3 pour les gros fichiers
+        // D'abord essayer le téléchargement direct
+        let downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
         
-        // Sauvegarder le fichier
-        const writer = fs.createWriteStream(outputPath);
-        response.data.pipe(writer);
-        
-        return new Promise((resolve, reject) => {
-            writer.on('finish', () => {
-                console.log(`✅ Téléchargement terminé: ${outputPath}`);
-                resolve();
+        try {
+            // Premier essai : téléchargement direct
+            const response = await axios({
+                method: 'GET',
+                url: downloadUrl,
+                responseType: 'stream',
+                timeout: 600000,
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
             });
-            writer.on('error', reject);
-        });
+            
+            // Vérifier si c'est vraiment une vidéo
+            const contentType = response.headers['content-type'];
+            console.log('📋 Content-Type reçu:', contentType);
+            
+            if (contentType && contentType.includes('text/html')) {
+                // C'est une page HTML, pas une vidéo !
+                console.error('❌ Google Drive a renvoyé une page HTML au lieu de la vidéo');
+                console.log('💡 Solutions :');
+                console.log('   1. Rendez le fichier public (Partager → Tout le monde ayant le lien)');
+                console.log('   2. Utilisez un fichier plus petit (<100MB)');
+                console.log('   3. Utilisez l\'API Google Drive avec authentification');
+                
+                throw new Error('Le fichier Google Drive n\'est pas accessible directement. Rendez-le public ou utilisez un fichier plus petit.');
+            }
+            
+            // Sauvegarder le fichier
+            const writer = fs.createWriteStream(outputPath);
+            response.data.pipe(writer);
+            
+            return new Promise((resolve, reject) => {
+                writer.on('finish', () => {
+                    // Vérifier la taille du fichier
+                    const stats = fs.statSync(outputPath);
+                    console.log(`✅ Téléchargement terminé: ${outputPath} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+                    
+                    // Si le fichier est trop petit, c'est probablement une page HTML
+                    if (stats.size < 1000) {
+                        const content = fs.readFileSync(outputPath, 'utf8');
+                        if (content.includes('<!DOCTYPE') || content.includes('<html')) {
+                            fs.unlinkSync(outputPath);
+                            reject(new Error('Google Drive a renvoyé une page HTML. Le fichier doit être rendu public.'));
+                            return;
+                        }
+                    }
+                    
+                    resolve();
+                });
+                writer.on('error', reject);
+            });
+            
+        } catch (error) {
+            if (error.response && error.response.status === 404) {
+                throw new Error('Fichier Google Drive introuvable. Vérifiez l\'URL.');
+            }
+            throw error;
+        }
         
     } catch (error) {
         console.error('❌ Erreur téléchargement:', error.message);
@@ -157,6 +194,9 @@ async function convertVideo(inputPath, outputPath, quality = '4k') {
 
 // Route principale de l'API
 app.post('/api/convert', authenticate, async (req, res) => {
+    console.log('\n=== NOUVELLE REQUÊTE REÇUE ===');
+    console.log('Body reçu:', JSON.stringify(req.body, null, 2));
+    
     const { url, quality = '4k', filename } = req.body;
     
     // Validation
@@ -304,6 +344,16 @@ app.get('/', (req, res) => {
     });
 });
 
+// Route de test (pour debug)
+app.post('/api/test', authenticate, (req, res) => {
+    console.log('Test reçu:', req.body);
+    res.json({
+        success: true,
+        received: req.body,
+        timestamp: new Date().toISOString()
+    });
+});
+
 // Gestion des erreurs 404
 app.use((req, res) => {
     res.status(404).json({ 
@@ -312,6 +362,7 @@ app.use((req, res) => {
             'GET /',
             'GET /api/status',
             'POST /api/convert',
+            'POST /api/test',
             'GET /download/:filename'
         ]
     });
