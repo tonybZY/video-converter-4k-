@@ -1,357 +1,334 @@
 const express = require('express');
-const multer = require('multer');
-const ffmpeg = require('fluent-ffmpeg');
-const path = require('path');
-const fs = require('fs');
 const axios = require('axios');
+const ffmpeg = require('fluent-ffmpeg');
+const fs = require('fs');
+const path = require('path');
 const cors = require('cors');
-const youtubedl = require('youtube-dl-exec');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configuration des clés API
-const API_KEY_1 = process.env.API_KEY_1 || 'pk_live_mega_converter_primary_key_2024_abc123';
-const API_KEY_2 = process.env.API_KEY_2 || 'sk_live_mega_converter_secret_key_2024_xyz789';
+// Configuration
+const API_KEY = process.env.API_KEY || 'pk_video_converter_4k_2024';
+const DOMAIN = process.env.RAILWAY_STATIC_URL || `http://localhost:${PORT}`;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
 
-// Middleware d'authentification API
-const authenticateAPI = (req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
-  
-  // Permettre l'accès sans clé API depuis le navigateur (interface web)
-  if (req.path === '/' || req.path.startsWith('/public/')) {
-    return next();
-  }
-  
-  // Pour les requêtes API, vérifier la clé
-  if (req.path.startsWith('/api/')) {
-    if (!apiKey) {
-      return res.status(401).json({ error: 'Clé API requise' });
+// Créer les dossiers nécessaires
+const UPLOAD_DIR = 'temp';
+const OUTPUT_DIR = 'converted';
+[UPLOAD_DIR, OUTPUT_DIR].forEach(dir => {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
     }
-    
-    if (apiKey !== API_KEY_1 && apiKey !== API_KEY_2) {
-      return res.status(403).json({ error: 'Clé API invalide' });
+});
+
+// Middleware d'authentification simple
+const authenticate = (req, res, next) => {
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey !== API_KEY) {
+        return res.status(403).json({ 
+            error: 'Clé API invalide ou manquante',
+            message: 'Ajoutez X-API-Key dans les headers'
+        });
     }
-  }
-  
-  next();
+    next();
 };
-
-app.use(authenticateAPI);
-
-// Configuration Multer
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = 'uploads/';
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + '-' + file.originalname);
-  }
-});
-
-const upload = multer({ 
-  storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 * 1024 } // 5GB max
-});
 
 // Fonction pour extraire l'ID Google Drive
 function extractGoogleDriveId(url) {
-  const patterns = [
-    /\/file\/d\/([a-zA-Z0-9_-]+)/,
-    /id=([a-zA-Z0-9_-]+)/,
-    /\/open\?id=([a-zA-Z0-9_-]+)/
-  ];
-  
-  for (const pattern of patterns) {
-    const match = url.match(pattern);
-    if (match) return match[1];
-  }
-  return null;
+    const patterns = [
+        /\/file\/d\/([a-zA-Z0-9_-]+)/,
+        /id=([a-zA-Z0-9_-]+)/,
+        /\/open\?id=([a-zA-Z0-9_-]+)/,
+        /drive\.google\.com\/.*[?&]id=([a-zA-Z0-9_-]+)/
+    ];
+    
+    for (const pattern of patterns) {
+        const match = url.match(pattern);
+        if (match) return match[1];
+    }
+    return null;
 }
 
-// Fonction pour télécharger depuis une URL
-async function downloadFromUrl(url, outputPath) {
-  try {
-    // Support Google Drive
-    if (url.includes('drive.google.com')) {
-      const fileId = extractGoogleDriveId(url);
-      if (fileId) {
-        url = `https://drive.google.com/uc?export=download&id=${fileId}`;
-      }
+// Fonction pour télécharger depuis Google Drive
+async function downloadFromGoogleDrive(url, outputPath) {
+    try {
+        // Extraire l'ID du fichier
+        const fileId = extractGoogleDriveId(url);
+        if (!fileId) {
+            throw new Error('ID Google Drive non trouvé dans l\'URL');
+        }
+        
+        // URL de téléchargement direct Google Drive
+        const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+        
+        console.log(`📥 Téléchargement depuis Google Drive: ${fileId}`);
+        
+        // Télécharger le fichier
+        const response = await axios({
+            method: 'GET',
+            url: downloadUrl,
+            responseType: 'stream',
+            timeout: 600000, // 10 minutes pour les gros fichiers
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+        
+        // Sauvegarder le fichier
+        const writer = fs.createWriteStream(outputPath);
+        response.data.pipe(writer);
+        
+        return new Promise((resolve, reject) => {
+            writer.on('finish', () => {
+                console.log(`✅ Téléchargement terminé: ${outputPath}`);
+                resolve();
+            });
+            writer.on('error', reject);
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur téléchargement:', error.message);
+        throw error;
     }
-    
-    // Support Dropbox
-    if (url.includes('dropbox.com')) {
-      url = url.replace('?dl=0', '?dl=1');
-    }
-    
-    // Support YouTube et autres plateformes
-    if (url.includes('youtube.com') || url.includes('youtu.be') || 
-        url.includes('vimeo.com') || url.includes('dailymotion.com')) {
-      await youtubedl(url, {
-        output: outputPath,
-        format: 'best[ext=mp4]/best'
-      });
-      return;
-    }
-    
-    // Téléchargement direct pour autres URLs
-    const response = await axios({
-      method: 'GET',
-      url: url,
-      responseType: 'stream',
-      timeout: 300000 // 5 minutes timeout
-    });
-    
-    const writer = fs.createWriteStream(outputPath);
-    response.data.pipe(writer);
-    
+}
+
+// Fonction pour convertir la vidéo (optimisée pour les réseaux sociaux)
+async function convertVideo(inputPath, outputPath, quality = '4k') {
     return new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
+        console.log(`🎬 Conversion en cours: ${quality}`);
+        
+        // Paramètres optimisés pour les réseaux sociaux
+        let outputOptions = [
+            '-c:v libx264',      // Codec vidéo H.264 (compatible partout)
+            '-preset medium',     // Balance qualité/vitesse
+            '-crf 23',           // Qualité (plus bas = meilleure qualité)
+            '-c:a aac',          // Codec audio AAC
+            '-b:a 192k',         // Bitrate audio
+            '-movflags +faststart', // Optimisation pour streaming
+            '-pix_fmt yuv420p'   // Format de pixels compatible
+        ];
+        
+        // Résolution selon la qualité demandée
+        switch(quality) {
+            case '4k':
+                outputOptions.push('-vf scale=3840:2160:force_original_aspect_ratio=decrease,pad=3840:2160:(ow-iw)/2:(oh-ih)/2');
+                outputOptions.push('-b:v 35M'); // Bitrate pour 4K
+                break;
+            case '1080p':
+                outputOptions.push('-vf scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2');
+                outputOptions.push('-b:v 8M');  // Bitrate pour 1080p
+                break;
+            case '720p':
+                outputOptions.push('-vf scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2');
+                outputOptions.push('-b:v 5M');  // Bitrate pour 720p
+                break;
+            default:
+                // Garder la qualité originale
+                outputOptions.push('-b:v 10M');
+        }
+        
+        ffmpeg(inputPath)
+            .outputOptions(outputOptions)
+            .on('start', (commandLine) => {
+                console.log('🎯 Commande FFmpeg:', commandLine);
+            })
+            .on('progress', (progress) => {
+                if (progress.percent) {
+                    console.log(`📊 Progression: ${Math.round(progress.percent)}%`);
+                }
+            })
+            .on('end', () => {
+                console.log('✅ Conversion terminée');
+                resolve();
+            })
+            .on('error', (err) => {
+                console.error('❌ Erreur conversion:', err);
+                reject(err);
+            })
+            .save(outputPath);
     });
-  } catch (error) {
-    throw new Error(`Erreur lors du téléchargement: ${error.message}`);
-  }
 }
 
-// Route principale (interface web)
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// Route API pour la conversion depuis URL (pour n8n)
-app.post('/api/convert-url', async (req, res) => {
-  const { url, format = 'mp4', quality = '4k' } = req.body;
-  
-  if (!url) {
-    return res.status(400).json({ error: 'URL requise' });
-  }
-  
-  const tempInput = path.join('uploads', `temp-${Date.now()}.mp4`);
-  const outputFilename = `converted-${Date.now()}.${format}`;
-  const outputPath = path.join('uploads', outputFilename);
-  
-  try {
-    console.log('Téléchargement en cours depuis:', url);
-    await downloadFromUrl(url, tempInput);
+// Route principale de l'API
+app.post('/api/convert', authenticate, async (req, res) => {
+    const { url, quality = '4k', filename } = req.body;
     
-    // Déterminer les paramètres de qualité
-    let outputOptions = [
-      '-c:v libx264',
-      '-preset slow',
-      '-crf 18',
-      '-c:a aac',
-      '-b:a 320k'
-    ];
-    
-    if (quality === '4k') {
-      outputOptions.push('-vf scale=3840:2160');
-    } else if (quality === '1080p') {
-      outputOptions.push('-vf scale=1920:1080');
-    } else if (quality === '720p') {
-      outputOptions.push('-vf scale=1280:720');
+    // Validation
+    if (!url || !url.includes('drive.google.com')) {
+        return res.status(400).json({ 
+            error: 'URL Google Drive requise',
+            example: 'https://drive.google.com/file/d/FILE_ID/view'
+        });
     }
     
-    // Convertir avec FFmpeg
-    await new Promise((resolve, reject) => {
-      ffmpeg(tempInput)
-        .outputOptions(outputOptions)
-        .on('progress', (progress) => {
-          console.log(`Progression: ${progress.percent}%`);
-        })
-        .on('end', resolve)
-        .on('error', reject)
-        .save(outputPath);
-    });
+    // Générer des noms de fichiers uniques
+    const timestamp = Date.now();
+    const tempFile = path.join(UPLOAD_DIR, `temp_${timestamp}.mp4`);
+    const outputFilename = filename || `video_${timestamp}_${quality}.mp4`;
+    const outputFile = path.join(OUTPUT_DIR, outputFilename);
     
-    // Nettoyer le fichier temporaire
-    fs.unlinkSync(tempInput);
-    
-    // Générer une URL de téléchargement temporaire
-    const downloadUrl = `${req.protocol}://${req.get('host')}/download/${path.basename(outputPath)}`;
-    
-    res.json({
-      success: true,
-      message: 'Conversion réussie',
-      downloadUrl: downloadUrl,
-      filename: outputFilename,
-      expiresIn: '5 minutes'
-    });
-    
-    // Supprimer le fichier après 5 minutes
-    setTimeout(() => {
-      if (fs.existsSync(outputPath)) {
-        fs.unlinkSync(outputPath);
-      }
-    }, 300000);
-    
-  } catch (error) {
-    console.error('Erreur:', error);
-    if (fs.existsSync(tempInput)) fs.unlinkSync(tempInput);
-    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-    
-    res.status(500).json({ 
-      error: 'Erreur lors de la conversion', 
-      details: error.message 
-    });
-  }
+    try {
+        // 1. Télécharger depuis Google Drive
+        console.log('\n🚀 Nouvelle conversion:', { url, quality });
+        await downloadFromGoogleDrive(url, tempFile);
+        
+        // 2. Vérifier que le fichier existe
+        if (!fs.existsSync(tempFile)) {
+            throw new Error('Échec du téléchargement');
+        }
+        
+        // 3. Obtenir la taille du fichier
+        const stats = fs.statSync(tempFile);
+        console.log(`📁 Taille du fichier: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+        
+        // 4. Convertir la vidéo
+        await convertVideo(tempFile, outputFile, quality);
+        
+        // 5. Nettoyer le fichier temporaire
+        fs.unlinkSync(tempFile);
+        
+        // 6. Générer l'URL de téléchargement
+        const downloadUrl = `${DOMAIN}/download/${outputFilename}`;
+        
+        // 7. Programmer la suppression après 10 minutes
+        setTimeout(() => {
+            if (fs.existsSync(outputFile)) {
+                fs.unlinkSync(outputFile);
+                console.log(`🗑️ Fichier supprimé: ${outputFilename}`);
+            }
+        }, 600000); // 10 minutes
+        
+        // 8. Réponse avec toutes les infos
+        res.json({
+            success: true,
+            message: 'Conversion réussie',
+            data: {
+                downloadUrl: downloadUrl,
+                directUrl: downloadUrl,
+                filename: outputFilename,
+                quality: quality,
+                size: fs.statSync(outputFile).size,
+                expiresIn: '10 minutes',
+                format: 'mp4',
+                optimizedFor: 'social_media'
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur globale:', error);
+        
+        // Nettoyer les fichiers en cas d'erreur
+        [tempFile, outputFile].forEach(file => {
+            if (fs.existsSync(file)) {
+                fs.unlinkSync(file);
+            }
+        });
+        
+        res.status(500).json({ 
+            error: 'Erreur lors de la conversion',
+            message: error.message,
+            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
 });
 
-// Route API pour obtenir le statut
-app.get('/api/status', (req, res) => {
-  res.json({
-    status: 'online',
-    version: '1.0.0',
-    supportedFormats: ['mp4', 'avi', 'mov', 'mkv', 'webm'],
-    supportedQualities: ['4k', '1080p', '720p', 'original']
-  });
-});
-
-// Route de téléchargement
+// Route pour télécharger les fichiers convertis
 app.get('/download/:filename', (req, res) => {
-  const filePath = path.join('uploads', req.params.filename);
-  
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Fichier non trouvé' });
-  }
-  
-  res.download(filePath);
-});
-
-// Routes pour l'interface web (sans authentification API)
-app.post('/convert-url', async (req, res) => {
-  const { url, format = 'mp4', quality = '4k' } = req.body;
-  
-  if (!url) {
-    return res.status(400).json({ error: 'URL requise' });
-  }
-  
-  const tempInput = path.join('uploads', `temp-${Date.now()}.mp4`);
-  const outputFilename = `converted-${Date.now()}.${format}`;
-  const outputPath = path.join('uploads', outputFilename);
-  
-  try {
-    await downloadFromUrl(url, tempInput);
+    const filename = req.params.filename;
+    const filepath = path.join(OUTPUT_DIR, filename);
     
-    let outputOptions = [
-      '-c:v libx264',
-      '-preset slow',
-      '-crf 18',
-      '-c:a aac',
-      '-b:a 320k'
-    ];
-    
-    if (quality === '4k') {
-      outputOptions.push('-vf scale=3840:2160');
-    } else if (quality === '1080p') {
-      outputOptions.push('-vf scale=1920:1080');
-    } else if (quality === '720p') {
-      outputOptions.push('-vf scale=1280:720');
+    // Sécurité : empêcher l'accès aux dossiers parents
+    if (filename.includes('..')) {
+        return res.status(403).json({ error: 'Accès interdit' });
     }
     
-    await new Promise((resolve, reject) => {
-      ffmpeg(tempInput)
-        .outputOptions(outputOptions)
-        .on('end', resolve)
-        .on('error', reject)
-        .save(outputPath);
-    });
-    
-    fs.unlinkSync(tempInput);
-    
-    res.download(outputPath, outputFilename, (err) => {
-      if (err) console.error(err);
-      setTimeout(() => {
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-        }
-      }, 60000);
-    });
-    
-  } catch (error) {
-    console.error('Erreur:', error);
-    if (fs.existsSync(tempInput)) fs.unlinkSync(tempInput);
-    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-    
-    res.status(500).json({ 
-      error: 'Erreur lors de la conversion', 
-      details: error.message 
-    });
-  }
-});
-
-// Route pour la conversion depuis upload
-app.post('/convert-file', upload.single('video'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'Aucun fichier fourni' });
-  }
-  
-  const { format = 'mp4', quality = '4k' } = req.body;
-  const inputPath = req.file.path;
-  const outputFilename = `converted-${Date.now()}.${format}`;
-  const outputPath = path.join('uploads', outputFilename);
-  
-  try {
-    let outputOptions = [
-      '-c:v libx264',
-      '-preset slow',
-      '-crf 18',
-      '-c:a aac',
-      '-b:a 320k'
-    ];
-    
-    if (quality === '4k') {
-      outputOptions.push('-vf scale=3840:2160');
-    } else if (quality === '1080p') {
-      outputOptions.push('-vf scale=1920:1080');
-    } else if (quality === '720p') {
-      outputOptions.push('-vf scale=1280:720');
+    // Vérifier que le fichier existe
+    if (!fs.existsSync(filepath)) {
+        return res.status(404).json({ 
+            error: 'Fichier non trouvé',
+            message: 'Le fichier a peut-être expiré'
+        });
     }
     
-    await new Promise((resolve, reject) => {
-      ffmpeg(inputPath)
-        .outputOptions(outputOptions)
-        .on('end', resolve)
-        .on('error', reject)
-        .save(outputPath);
-    });
-    
-    fs.unlinkSync(inputPath);
-    
-    res.download(outputPath, outputFilename, (err) => {
-      if (err) console.error(err);
-      setTimeout(() => {
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
+    // Envoyer le fichier
+    res.download(filepath, filename, (err) => {
+        if (err) {
+            console.error('Erreur téléchargement:', err);
+            res.status(500).json({ error: 'Erreur lors du téléchargement' });
         }
-      }, 60000);
     });
-    
-  } catch (error) {
-    console.error('Erreur:', error);
-    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-    
-    res.status(500).json({ 
-      error: 'Erreur lors de la conversion', 
-      details: error.message 
+});
+
+// Route de statut
+app.get('/api/status', (req, res) => {
+    res.json({
+        status: 'online',
+        version: '2.0',
+        api: {
+            endpoint: '/api/convert',
+            method: 'POST',
+            headers: {
+                'X-API-Key': 'Votre clé API',
+                'Content-Type': 'application/json'
+            },
+            body: {
+                url: 'URL Google Drive (requis)',
+                quality: '4k, 1080p, 720p, original (optionnel, défaut: 4k)',
+                filename: 'Nom personnalisé (optionnel)'
+            }
+        },
+        supportedQualities: ['4k', '1080p', '720p', 'original'],
+        optimizations: [
+            'H.264/AAC pour compatibilité maximale',
+            'Optimisé pour streaming (faststart)',
+            'Bitrate adapté par résolution',
+            'Aspect ratio préservé avec padding noir'
+        ]
     });
-  }
+});
+
+// Page d'accueil simple
+app.get('/', (req, res) => {
+    res.json({
+        name: 'Video Converter API',
+        version: '2.0',
+        status: 'Ready',
+        documentation: '/api/status',
+        usage: 'POST /api/convert avec X-API-Key header'
+    });
+});
+
+// Gestion des erreurs 404
+app.use((req, res) => {
+    res.status(404).json({ 
+        error: 'Route non trouvée',
+        availableRoutes: [
+            'GET /',
+            'GET /api/status',
+            'POST /api/convert',
+            'GET /download/:filename'
+        ]
+    });
 });
 
 // Démarrer le serveur
 app.listen(PORT, () => {
-  console.log(`🚀 Serveur démarré sur le port ${PORT}`);
-  console.log(`📡 Accès local: http://localhost:${PORT}`);
-  console.log(`🔑 API Keys configurées:`, API_KEY_1 ? 'Oui' : 'Non');
+    console.log(`
+🚀 Video Converter API démarré!
+📡 Port: ${PORT}
+🔗 URL: ${DOMAIN}
+🔑 API Key: ${API_KEY ? 'Configurée' : 'Non configurée'}
+📁 Dossiers: ${UPLOAD_DIR}/ et ${OUTPUT_DIR}/
+
+📝 Utilisation:
+   POST ${DOMAIN}/api/convert
+   Headers: X-API-Key: ${API_KEY}
+   Body: { "url": "https://drive.google.com/..." }
+    `);
 });
